@@ -1,0 +1,80 @@
+#include "DHT.h"
+
+// ==========================================
+// KONFIGURASI PIN
+// ==========================================
+#define DHTPIN 26
+#define DHTTYPE DHT22
+
+#define RELAY_PIN 27
+
+// Batas suhu untuk mengaktifkan relay
+#define BATAS_SUHU 25.0
+
+DHT dht(DHTPIN, DHTTYPE);
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Inisialisasi DHT22
+  dht.begin();
+
+  // Inisialisasi relay
+  pinMode(RELAY_PIN, OUTPUT);
+
+  // Kondisi awal relay OFF (Gunakan HIGH untuk Active-LOW)
+  digitalWrite(RELAY_PIN, HIGH);
+
+  Serial.println("======================================");
+  Serial.println("   TEST DHT22 + RELAY ESP32");
+  Serial.println("======================================");
+  Serial.println("DHT22 DATA : GPIO 26");
+  Serial.println("RELAY      : GPIO 27");
+  Serial.println("Batas suhu : 26.0 C"); 
+  Serial.println("======================================");
+}
+
+void loop() {
+
+  // Membaca suhu
+  float suhu = dht.readTemperature();
+
+  // Cek apakah pembacaan berhasil
+  if (isnan(suhu)) {
+    Serial.println("Gagal membaca DHT22!");
+
+    // Untuk keamanan, relay dimatikan (Gunakan HIGH)
+    digitalWrite(RELAY_PIN, HIGH);
+
+    delay(2000);
+    return;
+  }
+
+  // ==========================================
+  // TAMPILKAN HASIL
+  // ==========================================
+  Serial.print("Suhu: ");
+  Serial.print(suhu, 1);
+  Serial.print(" C");
+
+  // ==========================================
+  // KONTROL RELAY (Logika Active-LOW)
+  // ==========================================
+  if (suhu > BATAS_SUHU) {
+
+    // Sinyal LOW untuk MENGHIDUPKAN relay
+    digitalWrite(RELAY_PIN, LOW);
+
+    Serial.println(" --> RELAY ON / KIPAS HIDUP");
+
+  } else {
+
+    // Sinyal HIGH untuk MEMATIKAN relay
+    digitalWrite(RELAY_PIN, HIGH);
+
+    Serial.println(" --> RELAY OFF / KIPAS MATI");
+  }
+
+  delay(2000);
+}
