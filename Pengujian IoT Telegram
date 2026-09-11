@@ -1,0 +1,109 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+
+const char* ssid = "Rumah_Nenek";
+const char* password = "anabul_ok";
+
+#define BOT_TOKEN "8742223877:AAFXoxi119p-cSdyrL-pzQ2jp1Xr2Y34eGE"
+#define CHAT_ID "5862958986"
+
+WiFiClientSecure client;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("   TEST KIRIM PESAN TELEGRAM");
+  Serial.println("================================");
+
+  // ===============================
+  // Hubungkan WiFi
+  // ===============================
+  WiFi.begin(ssid, password);
+
+  Serial.print("Menghubungkan ke WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("WiFi BERHASIL terhubung!");
+  Serial.print("IP ESP32: ");
+  Serial.println(WiFi.localIP());
+
+  // ===============================
+  // Koneksi HTTPS
+  // ===============================
+  client.setInsecure();
+
+  Serial.println();
+  Serial.println("Menghubungkan ke Telegram...");
+
+  if (!client.connect("api.telegram.org", 443)) {
+    Serial.println("GAGAL terhubung ke Telegram!");
+    return;
+  }
+
+  Serial.println("Terhubung ke Telegram!");
+
+  // ===============================
+  // Pesan yang akan dikirim
+  // ===============================
+  String pesan = "🤖 Smart Pillbox berhasil terhubung!";
+
+  // Spasi harus diubah menjadi %20
+  pesan.replace(" ", "%20");
+
+  // ===============================
+  // Buat URL Telegram
+  // ===============================
+  String url = "/bot";
+  url += BOT_TOKEN;
+  url += "/sendMessage?chat_id=";
+  url += CHAT_ID;
+  url += "&text=";
+  url += pesan;
+
+  Serial.println("Mengirim pesan...");
+
+  // ===============================
+  // Kirim HTTP GET
+  // ===============================
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: api.telegram.org\r\n" +
+               "Connection: close\r\n\r\n");
+
+  // ===============================
+  // Tunggu jawaban Telegram
+  // ===============================
+  unsigned long timeout = millis();
+
+  while (client.available() == 0) {
+    if (millis() - timeout > 10000) {
+      Serial.println("Telegram tidak memberikan respons.");
+      client.stop();
+      return;
+    }
+  }
+
+  Serial.println();
+  Serial.println("RESPONS TELEGRAM:");
+  Serial.println("--------------------------------");
+
+  while (client.available()) {
+    String line = client.readStringUntil('\n');
+    Serial.println(line);
+  }
+
+  client.stop();
+
+  Serial.println("--------------------------------");
+  Serial.println("Tes selesai.");
+}
+
+void loop() {
+}
