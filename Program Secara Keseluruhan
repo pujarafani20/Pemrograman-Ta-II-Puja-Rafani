@@ -1,0 +1,325 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include "time.h"
+#include "DHT.h"
+#include "HX711.h"
+
+// ==========================================
+// 1. KONFIGURASI WIFI & TELEGRAM
+// ==========================================
+const char* ssid = "Rumah_Nenek";
+const char* password = "anabul_ok";
+
+#define BOT_TOKEN "8742223877:AAFXoxi119p-cSdyrL-pzQ2jp1Xr2Y34eGE"
+#define CHAT_ID "5862958986"
+
+// ==========================================
+// 2. KONFIGURASI NTP (WAKTU REAL-TIME VIA INTERNET)
+// ==========================================
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 7 * 3600; // Zona Waktu WIB (UTC + 7)
+const int daylightOffset_sec = 0;
+
+// ==========================================
+// 3. JADWAL MINUM OBAT REAL-TIME (SEBELUM MAKAN)
+// ==========================================
+// Tahap 0 (Sekat 1 Pagi)  : Jam 09:00 WIB
+// Tahap 2 (Sekat 3 Siang) : Jam 14:00 WIB
+// Tahap 4 (Sekat 5 Malam) : Jam 20:00 WIB
+const int jadwal_jam[6]   = {9,  0, 14, 0, 20, 0};
+const int jadwal_menit[6] = {0,  0,  0, 0,  0, 0};
+
+// Jeda Sesudah Makan (Tahap 1, 3, 5): 20 Menit
+const unsigned long WAKTU_JEDA_MAKAN = 20 * 60 * 1000UL; 
+
+// ==========================================
+// 4. KONFIGURASI SENSOR & AKTUATOR
+// ==========================================
+#define DHTPIN 26        
+#define DHTTYPE DHT22    
+#define RELAY_PIN 27     
+#define BATAS_SUHU 25.0  
+
+const int LOADCELL_DOUT_PIN = 4;
+const int LOADCELL_SCK_PIN = 5;
+const int PIR_PIN = 34; 
+#define BUZZER_PIN 18   
+
+const int ledPins[6] = {13, 12, 14, 25, 33, 32}; 
+
+DHT dht(DHTPIN, DHTTYPE);
+HX711 scale;
+
+enum StatusSistem { IDLE, ALARM, WAIT_TAKE };
+StatusSistem statusSekarang = IDLE;
+
+int tahap_obat = 0;             
+float faktor_kalibrasi = 17420.0; 
+float berat_sebelumnya = 0.0;
+float suhu_sekarang = 0.0;
+float berat_sekarang = 0.0;
+
+unsigned long waktuMonitor_sebelumnya = 0;
+const long jeda_Monitor = 2000; 
+
+unsigned long timer_20_menit = 0;
+unsigned long timer_buzzer_beep = 0;
+bool state_buzzer = false;
+
+unsigned long timer_baca_loadcell = 0;
+bool notif_suhu_terkirim = false;
+bool alarm_terpicu_menit_ini = false; 
+
+// Tambahan Variabel untuk menyimpan (Latching) status PIR
+bool pir_terdeteksi = false; 
+
+// ==========================================
+// 5. FUNGSI TELEGRAM & FORMAT WAKTU
+// ==========================================
+void kirimTelegram(String pesan) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  if (!client.connect("api.telegram.org", 443)) return;
+
+  pesan.replace(" ", "%20");
+  pesan.replace("\n", "%0A");
+
+  String url = "/bot" + String(BOT_TOKEN) + "/sendMessage?chat_id=" + String(CHAT_ID) + "&text=" + pesan;
+
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: api.telegram.org\r\n" +
+               "Connection: close\r\n\r\n");
+
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > 5000) {
+      client.stop();
+      return;
+    }
+  }
+  client.stop();
+}
+
+String getWaktuFormat() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Waktu Tidak Valid";
+  }
+  char timeStringBuff[50];
+  strftime(timeStringBuff, sizeof(timeStringBuff), "%H:%M:%S WIB", &timeinfo);
+  return String(timeStringBuff);
+}
+
+// ==========================================
+// 6. SETUP
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  dht.begin();
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Active-LOW
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  pinMode(PIR_PIN, INPUT);
+
+  for (int i = 0; i < 6; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    digitalWrite(ledPins[i], LOW);
+  }
+
+  Serial.println("\nMenghubungkan ke WiFi...");
+  WiFi.begin(ssid, password);
+
+  int counter_wifi = 0;
+  while (WiFi.status() != WL_CONNECTED && counter_wifi < 20) {
+    delay(500);
+    Serial.print(".");
+    counter_wifi++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Berhasil Terhubung!");
+    
+    // Sinkronisasi Waktu
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    Serial.println("Sistem Waktu NTP WIB Aktif.");
+  }
+
+  Serial.println("Menyiapkan Timbangan...");
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(faktor_kalibrasi);
+  scale.tare(); // Pastikan wadah obat di kotak KOSONG saat ESP32 dinyalakan
+
+  Serial.println("=========================================");
+  Serial.println("   SISTEM KOTAK OBAT PINTAR ESP32 SIAP!  ");
+  Serial.println("=========================================");
+
+  kirimTelegram("🤖 *Smart Pillbox Aktif (Real-Time Mode)*\nSystem Time: " + getWaktuFormat());
+}
+
+// ==========================================
+// 7. LOOP UTAMA
+// ==========================================
+void loop() {
+  unsigned long waktu_sekarang = millis();
+
+  // --- BLOK MONITORING SERIAL & SUHU (Tiap 2 Detik) ---
+  if (waktu_sekarang - waktuMonitor_sebelumnya >= jeda_Monitor) {
+    waktuMonitor_sebelumnya = waktu_sekarang;
+
+    float temp_suhu = dht.readTemperature();
+
+    if (isnan(temp_suhu)) {
+      digitalWrite(RELAY_PIN, HIGH); 
+    } else {
+      suhu_sekarang = temp_suhu;
+
+      if (suhu_sekarang > BATAS_SUHU) {
+        digitalWrite(RELAY_PIN, LOW); // Kipas ON
+        if (!notif_suhu_terkirim) {
+          kirimTelegram("⚠️ *Peringatan Suhu!*\nSuhu: " + String(suhu_sekarang, 1) + " °C.\nKipas pendingin AKTIF.");
+          notif_suhu_terkirim = true;
+        }
+      } else {
+        digitalWrite(RELAY_PIN, HIGH); // Kipas OFF
+        if (notif_suhu_terkirim) {
+          kirimTelegram("✅ *Suhu Normal*\nSuhu: " + String(suhu_sekarang, 1) + " °C.\nKipas pendingin MATI.");
+          notif_suhu_terkirim = false;
+        }
+      }
+    }
+
+    if (scale.is_ready()) {
+      berat_sekarang = scale.get_units(5); 
+    }
+
+    Serial.println("\n----------------- [MONITOR SISTEM] -----------------");
+    Serial.print(" > Jam Real-Time : "); Serial.println(getWaktuFormat());
+    Serial.print(" > Suhu          : "); Serial.print(suhu_sekarang, 1); 
+    Serial.println(digitalRead(RELAY_PIN) == LOW ? " °C (Kipas: ON)" : " °C (Kipas: OFF)");
+    Serial.print(" > Berat Kotak   : "); Serial.print(berat_sekarang, 2); Serial.println(" Gram");
+    Serial.print(" > Tahap Obat    : "); Serial.print(tahap_obat + 1);
+    Serial.println(tahap_obat % 2 == 0 ? " (Sebelum Makan)" : " (Sesudah Makan)");
+    Serial.println("----------------------------------------------------");
+  }
+
+  // --- BLOK STATE MACHINE PENGAMBILAN OBAT ---
+  switch (statusSekarang) {
+
+    case IDLE:
+      if (tahap_obat % 2 == 0) {
+        // Cek Jadwal Pagi/Siang/Malam (Sebelum Makan)
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo)) {
+          int jam_sekarang = timeinfo.tm_hour;
+          int menit_sekarang = timeinfo.tm_min;
+
+          if (jam_sekarang == jadwal_jam[tahap_obat] && menit_sekarang == jadwal_menit[tahap_obat]) {
+            if (!alarm_terpicu_menit_ini) {
+              
+              // Kunci berat acuan TEPAT saat alarm mulai menyala (ambil rata-rata 5 bacaan agar stabil)
+              if (scale.is_ready()) { berat_sebelumnya = scale.get_units(5); }
+              else { berat_sebelumnya = berat_sekarang; }
+              
+              pir_terdeteksi = false; // Reset status PIR sebelum mulai
+              statusSekarang = ALARM;
+              alarm_terpicu_menit_ini = true;
+              
+              String msg = "🔔 *WAKTUNYA MINUM OBAT!*\n";
+              msg += "Waktu: " + getWaktuFormat() + "\n";
+              msg += "Jadwal: Sekat " + String(tahap_obat + 1) + " (Sebelum Makan)";
+              kirimTelegram(msg);
+            }
+          } else {
+            alarm_terpicu_menit_ini = false;
+          }
+        }
+      } 
+      else {
+        // Cek Jeda 20 Menit Sesudah Makan
+        if (waktu_sekarang - timer_20_menit >= WAKTU_JEDA_MAKAN) {
+          
+          // Kunci berat acuan TEPAT saat timer 20 menit habis
+          if (scale.is_ready()) { berat_sebelumnya = scale.get_units(5); }
+          else { berat_sebelumnya = berat_sekarang; }
+          
+          pir_terdeteksi = false; // Reset status PIR
+          statusSekarang = ALARM;
+          
+          String msg = "🔔 *WAKTUNYA MINUM OBAT!*\n";
+          msg += "Waktu: " + getWaktuFormat() + "\n";
+          msg += "Jadwal: Sekat " + String(tahap_obat + 1) + " (Sesudah Makan)";
+          kirimTelegram(msg);
+        }
+      }
+      break;
+
+    case ALARM:
+      if (waktu_sekarang - timer_buzzer_beep >= 300) {
+        timer_buzzer_beep = waktu_sekarang;
+        state_buzzer = !state_buzzer;
+        digitalWrite(BUZZER_PIN, state_buzzer ? HIGH : LOW);
+      }
+
+      // Deteksi PIR untuk mematikan alarm
+      if (digitalRead(PIR_PIN) == HIGH) {
+        digitalWrite(BUZZER_PIN, LOW);          
+        digitalWrite(ledPins[tahap_obat], HIGH); 
+        
+        pir_terdeteksi = true; // Kunci (latching) status PIR menjadi TRUE
+        
+        statusSekarang = WAIT_TAKE;
+      }
+      break;
+
+    case WAIT_TAKE:
+      if (waktu_sekarang - timer_baca_loadcell >= 500) {
+        timer_baca_loadcell = waktu_sekarang;
+
+        if (scale.is_ready()) {
+          float berat_instant = scale.get_units(3);
+          float selisih_berat = berat_sebelumnya - berat_instant;
+
+          // Threshold pengambilan obat: selisih berat >= 0.5 gram
+          if (selisih_berat >= 0.5) { 
+            digitalWrite(ledPins[tahap_obat], LOW); 
+
+            // Gunakan variabel pir_terdeteksi untuk log (tidak baca sensor ulang)
+            String status_pir_teks = pir_terdeteksi ? "Terdeteksi" : "Tidak Terdeteksi";
+
+            // Format pesan log lengkap
+            String msg_diambil = "✅ *LOG PENGAMBILAN OBAT SELESAI*\n";
+            msg_diambil += "• Waktu: " + getWaktuFormat() + "\n";
+            msg_diambil += "• Jadwal: Sekat " + String(tahap_obat + 1) + "\n";
+            msg_diambil += "• Sensor PIR: " + status_pir_teks + "\n";
+            msg_diambil += "• Suhu Kotak: " + String(suhu_sekarang, 1) + " °C\n";
+            msg_diambil += "• Sisa Berat Kotak: " + String(berat_instant, 2) + " Gram";
+            
+            kirimTelegram(msg_diambil);
+
+            if (tahap_obat % 2 == 0) {
+              timer_20_menit = millis(); // Memulai timer 20 menit untuk sekat sesudah makan
+            }
+
+            tahap_obat++;
+            if (tahap_obat > 5) {
+              tahap_obat = 0; 
+              kirimTelegram("🎉 *Semua jadwal obat hari ini telah selesai!*");
+            }
+
+            statusSekarang = IDLE; 
+            delay(1000);
+          }
+        }
+      }
+      break;
+  }
+}
