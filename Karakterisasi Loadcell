@@ -1,0 +1,68 @@
+#include "HX711.h"
+
+// Konfigurasi Pin ESP32 (sesuaikan dengan wiring jika berbeda)
+const int LOADCELL_DOUT_PIN = 4;
+const int LOADCELL_SCK_PIN = 5;
+
+HX711 scale;
+
+// Nilai awal calibration factor. Nilai ini yang akan kita cari.
+float calibration_factor = 17420.0; 
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("=========================================");
+  Serial.println("   Program Kalibrasi Load Cell HX711");
+  Serial.println("=========================================");
+  Serial.println("1. Kosongkan timbangan (jangan ada beban).");
+  delay(3000);
+
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  
+  // Mengatur skala ke default
+  scale.set_scale();
+  
+  // Melakukan Tare (Nol-kan timbangan)
+  scale.tare(); 
+  
+  Serial.println("Timbangan telah di-nol-kan (Tare).");
+  Serial.println("2. Letakkan beban yang sudah diketahui beratnya (misal: 100 gram atau 1 kg).");
+  Serial.println("\nGunakan Serial Monitor untuk menyesuaikan Calibration Factor:");
+  Serial.println("Ketik '+' atau 'a' untuk MENAMBAH nilai");
+  Serial.println("Ketik '-' atau 'z' untuk MENGURANGI nilai");
+  Serial.println("=========================================\n");
+  delay(3000);
+}
+
+void loop() {
+  // Terapkan calibration factor saat ini
+  scale.set_scale(calibration_factor);
+  
+  // Ambil rata-rata dari 10 pembacaan agar lebih stabil
+  float weight = scale.get_units(10); 
+  
+  Serial.print("Berat terbaca: ");
+  Serial.print(weight, 2); 
+  Serial.print(" | Calibration Factor Saat Ini: ");
+  Serial.println(calibration_factor);
+
+  // Membaca input dari Serial Monitor untuk mengubah calibration factor
+  if (Serial.available()) {
+    char temp = Serial.read();
+    if (temp == '+' || temp == 'a') {
+      calibration_factor += 10;
+    } 
+    else if (temp == '-' || temp == 'z') {
+      calibration_factor -= 10;
+    }
+    // Opsi untuk penambahan/pengurangan yang lebih besar
+    else if (temp == 's') {
+      calibration_factor += 100;
+    }
+    else if (temp == 'x') {
+      calibration_factor -= 100;
+    }
+  }
+  
+  delay(500); // Jeda agar Serial Monitor tidak terlalu cepat bergulir
+}
