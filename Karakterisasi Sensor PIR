@@ -1,0 +1,55 @@
+// --- Deklarasi Pin ESP32 (Sangat Aman) ---
+const int pinPIR = 14;      // Pin input dari sensor PIR OUT (GPIO 14)
+const int pinLED = 4;       // Pin output untuk LED 5mm (GPIO 4)
+
+// --- Variabel Logika millis() ---
+bool operatorHadir = false;           // Status keberadaan operator
+unsigned long waktuTerakhirGerak = 0; // Menyimpan catatan waktu gerakan terakhir
+
+// Atur durasi penahan status setelah tangan diam (contoh: 5000 ms = 5 detik)
+const unsigned long durasiTunggu = 5000; 
+
+void setup() {
+  // ESP32 bekerja paling stabil di baud rate 115200
+  Serial.begin(9600);
+  pinMode(pinPIR, INPUT);
+  pinMode(pinLED, OUTPUT);
+  
+  // Memastikan LED mati saat awal
+  digitalWrite(pinLED, LOW);
+  
+  Serial.println("Sistem Uji PIR ESP32 Dimulai...");
+  Serial.println("Membiarkan sensor PIR pemanasan selama 30 detik...");
+  Serial.println("Mohon jangan ada gerakan di depan sensor!");
+  
+  // Waktu pemanasan sensor 
+  delay(30000); 
+  Serial.println("Pemanasan Selesai. Sensor PIR Siap Diuji!");
+  Serial.println("------------------------------------------");
+}
+
+void loop() {
+  unsigned long waktuSekarang = millis(); // Cek 'jam tangan' internal ESP32
+  int statusPIR = digitalRead(pinPIR);    // Baca output digital (1 atau 0) sensor PIR
+  
+  // LOGIKA 1: Jika mendeteksi gerakan (Sinyal HIGH dari PIR)
+  if (statusPIR == HIGH) {
+    if (!operatorHadir) {
+      Serial.println("[!] Gerakan Terdeteksi -> Tangan Masuk. LED NYALA.");
+    }
+    operatorHadir = true;                 // Kunci status ada gerakan
+    waktuTerakhirGerak = waktuSekarang;   // Reset timer ke waktu saat ini
+    digitalWrite(pinLED, HIGH);           // Nyalakan LED
+  }
+
+  // LOGIKA 2: Jika tidak ada gerakan (Sinyal LOW dari PIR)
+  if (statusPIR == LOW && operatorHadir == true) {
+    // Periksa apakah waktu diam sudah mencapai 5 detik
+    if (waktuSekarang - waktuTerakhirGerak >= durasiTunggu) {
+      operatorHadir = false;              // Cabut status kehadiran
+      digitalWrite(pinLED, LOW);          // Matikan LED
+      Serial.println("[v] Tidak Ada Gerakan -> Waktu Tunggu 5 Detik Habis. LED MATI.");
+      Serial.println("------------------------------------------");
+    }
+  }
+}
